@@ -477,16 +477,12 @@ print(len(servers))
 			"Fix: $(_cowork_pkg_hint "$_distro_id" bubblewrap)"
 	fi
 
-	# Use _warn for missing KVM deps only when KVM is explicitly
-	# requested; otherwise use _info since bwrap is the default.
-	local _kvm_flag
-	_kvm_flag="${COWORK_VM_BACKEND:-}"
-	local _kvm_issue
-	if [[ ${_kvm_flag,,} == kvm ]]; then
-		_kvm_issue=_warn
-	else
-		_kvm_issue=_info
-	fi
+	# Warn on missing KVM deps only when explicitly requested;
+	# otherwise just inform since bwrap is the default.
+	local _kvm_active=false
+	[[ ${COWORK_VM_BACKEND-} == [Kk][Vv][Mm] ]] && _kvm_active=true
+	local _kvm_issue=_info
+	$_kvm_active && _kvm_issue=_warn
 
 	# KVM backend (opt-in via COWORK_VM_BACKEND=kvm)
 	if [[ -e /dev/kvm ]]; then
@@ -499,7 +495,7 @@ print(len(servers))
 		fi
 	else
 		"$_kvm_issue" 'KVM: not available'
-		if [[ ${_kvm_flag,,} == kvm ]]; then
+		if $_kvm_active; then
 			_info \
 				'Fix: Install qemu-kvm and ensure KVM is enabled in BIOS'
 		fi
@@ -510,7 +506,7 @@ print(len(servers))
 		_pass 'vsock: module loaded'
 	else
 		"$_kvm_issue" 'vsock: /dev/vhost-vsock not found'
-		if [[ ${_kvm_flag,,} == kvm ]]; then
+		if $_kvm_active; then
 			_info 'Fix: sudo modprobe vhost_vsock'
 		fi
 	fi
@@ -531,7 +527,7 @@ print(len(servers))
 			_pass "$_tool_label: found"
 		else
 			"$_kvm_issue" "$_tool_label: not found"
-			if [[ ${_kvm_flag,,} == kvm ]]; then
+			if $_kvm_active; then
 				_info \
 					"Fix: $(_cowork_pkg_hint "$_distro_id" "$_tool_pkg")"
 			fi
