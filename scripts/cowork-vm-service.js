@@ -398,19 +398,44 @@ function validateMountPath(mountPath, opts) {
 
     const normalized = path.resolve(mountPath);
 
-    if (FORBIDDEN_MOUNT_PATHS.has(normalized)) {
-        return { valid: false, reason: `Path is forbidden: ${normalized}` };
+    // Resolve symlinks when the path exists on disk (defense-in-depth).
+    // This is a TOCTOU situation, but bwrap is the real security boundary;
+    // this just catches honest configuration mistakes.
+    let resolved = normalized;
+    try {
+        resolved = fs.realpathSync(normalized);
+    } catch (_) {
+        // Path doesn't exist yet — use the unresolved form
     }
 
-    for (const forbidden of FORBIDDEN_MOUNT_PATHS) {
-        if (forbidden !== '/' && normalized.startsWith(forbidden + '/')) {
-            return { valid: false, reason: `Path is under forbidden path: ${forbidden}` };
+    function checkForbidden(p) {
+        if (FORBIDDEN_MOUNT_PATHS.has(p)) {
+            return `Path is forbidden: ${p}`;
+        }
+        for (const forbidden of FORBIDDEN_MOUNT_PATHS) {
+            if (forbidden !== '/' && p.startsWith(forbidden + '/')) {
+                return `Path is under forbidden path: ${forbidden}`;
+            }
+        }
+        return null;
+    }
+
+    const normalizedErr = checkForbidden(normalized);
+    if (normalizedErr) {
+        return { valid: false, reason: normalizedErr };
+    }
+
+    if (resolved !== normalized) {
+        const resolvedErr = checkForbidden(resolved);
+        if (resolvedErr) {
+            return { valid: false, reason: `Symlink resolves to forbidden path: ${resolved}` };
         }
     }
 
     if (opts.readWrite) {
         const home = os.homedir();
-        if (normalized !== home && !normalized.startsWith(home + '/')) {
+        const check = resolved !== normalized ? resolved : normalized;
+        if (check !== home && !check.startsWith(home + '/')) {
             return { valid: false, reason: 'Read-write mounts must be under $HOME' };
         }
     }
@@ -461,7 +486,21 @@ function loadBwrapMountsConfig(configPath, logFn) {
         additionalROBinds: filterPaths(mounts.additionalROBinds, false),
         additionalBinds: filterPaths(mounts.additionalBinds, true),
         disabledDefaultBinds: Array.isArray(mounts.disabledDefaultBinds)
-            ? mounts.disabledDefaultBinds.filter(p => typeof p === 'string')
+            ? mounts.disabledDefaultBinds
+                .filter(p => {
+                    if (typeof p !== 'string') return false;
+                    if (!path.isAbsolute(p)) {
+                        warn(`BwrapConfig: rejected disabled path "${p}": Path must be absolute`);
+                        return false;
+                    }
+                    const normalized = path.resolve(p);
+                    if (CRITICAL_MOUNTS.has(normalized)) {
+                        warn(`BwrapConfig: cannot disable critical mount: ${normalized}`);
+                        return false;
+                    }
+                    return true;
+                })
+                .map(p => path.resolve(p))
             : [],
     };
 }
@@ -474,8 +513,17 @@ function mergeBwrapArgs(defaultArgs, config) {
         config.disabledDefaultBinds.filter(p => !CRITICAL_MOUNTS.has(p))
     );
 
-    const TWO_ARG_FLAGS = new Set(['--tmpfs', '--dev', '--proc', '--dir']);
-    const THREE_ARG_FLAGS = new Set(['--ro-bind', '--bind', '--symlink']);
+    const TWO_ARG_FLAGS = new Set([
+        '--tmpfs', '--dev', '--proc', '--dir',
+        '--remount-ro', '--file', '--unsetenv',
+        '--chdir', '--size', '--perms',
+    ]);
+    const THREE_ARG_FLAGS = new Set([
+        '--ro-bind', '--bind', '--symlink',
+        '--ro-bind-try', '--bind-try',
+        '--dev-bind', '--dev-bind-try',
+        '--chmod', '--setenv',
+    ]);
 
     let i = 0;
     while (i < defaultArgs.length) {
@@ -873,7 +921,16 @@ class BwrapBackend extends LocalBackend {
     constructor(emitEvent) {
         super(emitEvent, 'BwrapBackend');
         this.mountBinds = new Map(); // mountName -> hostPath
-        this.bwrapMountsConfig = loadBwrapMountsConfig();
+        this.bwrapMountsConfig = loadBwrapMountsConfig(null, log);
+        const mc = this.bwrapMountsConfig;
+        if (mc.additionalROBinds.length
+            || mc.additionalBinds.length
+            || mc.disabledDefaultBinds.length) {
+            log('BwrapBackend: custom mount config: '
+                + mc.additionalROBinds.length + ' RO, '
+                + mc.additionalBinds.length + ' RW, '
+                + mc.disabledDefaultBinds.length + ' disabled');
+        }
     }
 
     async startVM(params) {
@@ -2271,5 +2328,15 @@ function startServer() {
 // dedup flag (_svcLaunched) preventing duplicate daemon launches, so a
 // simple synchronous cleanup avoids the race condition where an async
 // connection test delays startup while the app is already retrying.
-cleanupSocket();
-startServer();
+if (require.main === module) {
+    cleanupSocket();
+    startServer();
+}
+
+module.exports = {
+    FORBIDDEN_MOUNT_PATHS,
+    CRITICAL_MOUNTS,
+    validateMountPath,
+    loadBwrapMountsConfig,
+    mergeBwrapArgs,
+};

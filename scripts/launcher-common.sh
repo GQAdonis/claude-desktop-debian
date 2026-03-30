@@ -273,7 +273,6 @@ _info() { echo -e "       $*"; }
 
 # Check custom bwrap mount configuration and report findings
 _doctor_check_bwrap_mounts() {
-	_doctor_colors
 	local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/Claude"
 	local config_file="$config_dir/claude_desktop_linux_config.json"
 
@@ -322,46 +321,49 @@ JSEOF
 
 	_info 'Bwrap custom mount configuration detected:'
 
-	local ro_binds='' rw_binds='' disabled_binds=''
+	local parsed_output=''
 	if [[ $parser == 'python3' ]]; then
-		ro_binds=$(python3 - "$mounts_json" 2>/dev/null <<'PYEOF'
+		parsed_output=$(python3 - "$mounts_json" 2>/dev/null <<'PYEOF'
 import json, sys
 m = json.loads(sys.argv[1])
 for p in m.get('additionalROBinds', []):
     print(p)
-PYEOF
-)
-		rw_binds=$(python3 - "$mounts_json" 2>/dev/null <<'PYEOF'
-import json, sys
-m = json.loads(sys.argv[1])
+print('---')
 for p in m.get('additionalBinds', []):
     print(p)
-PYEOF
-)
-		disabled_binds=$(python3 - "$mounts_json" 2>/dev/null <<'PYEOF'
-import json, sys
-m = json.loads(sys.argv[1])
+print('---')
 for p in m.get('disabledDefaultBinds', []):
     print(p)
 PYEOF
 )
 	else
-		ro_binds=$(node - "$mounts_json" 2>/dev/null <<'JSEOF'
+		parsed_output=$(node - "$mounts_json" 2>/dev/null <<'JSEOF'
 const m = JSON.parse(process.argv[1]);
 (m.additionalROBinds || []).forEach(p => console.log(p));
-JSEOF
-)
-		rw_binds=$(node - "$mounts_json" 2>/dev/null <<'JSEOF'
-const m = JSON.parse(process.argv[1]);
+console.log('---');
 (m.additionalBinds || []).forEach(p => console.log(p));
-JSEOF
-)
-		disabled_binds=$(node - "$mounts_json" 2>/dev/null <<'JSEOF'
-const m = JSON.parse(process.argv[1]);
+console.log('---');
 (m.disabledDefaultBinds || []).forEach(p => console.log(p));
 JSEOF
 )
 	fi
+
+	local ro_binds='' rw_binds='' disabled_binds=''
+	local section=0
+	while IFS= read -r line; do
+		if [[ $line == '---' ]]; then
+			((section++))
+			continue
+		fi
+		case $section in
+			0) ro_binds+="${line}"$'\n' ;;
+			1) rw_binds+="${line}"$'\n' ;;
+			2) disabled_binds+="${line}"$'\n' ;;
+		esac
+	done <<< "$parsed_output"
+	ro_binds=${ro_binds%$'\n'}
+	rw_binds=${rw_binds%$'\n'}
+	disabled_binds=${disabled_binds%$'\n'}
 
 	if [[ -n $ro_binds ]]; then
 		_info '  Read-only mounts:'
@@ -377,8 +379,8 @@ JSEOF
 		done <<< "$rw_binds"
 	fi
 
+	local critical_warned=false
 	if [[ -n $disabled_binds ]]; then
-		local critical_warned=false
 		while IFS= read -r bind_path; do
 			case "$bind_path" in
 				/usr|/etc)
@@ -402,9 +404,11 @@ JSEOF
 		fi
 	fi
 
-	_info \
-		'  Note: Restart daemon for config changes:' \
-		'pkill -f cowork-vm-service'
+	if [[ $critical_warned != true ]]; then
+		_info \
+			'  Note: Restart daemon for config changes:' \
+			'pkill -f cowork-vm-service'
+	fi
 }
 
 # Run all diagnostic checks and print results

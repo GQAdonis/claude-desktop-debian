@@ -4,145 +4,25 @@
 # Tests for configurable bwrap mount points (issue #339)
 #
 
+SCRIPT_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")" && pwd)"
+
 NODE_PREAMBLE='
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
 
-function log() {}
-
-// --- Functions under test ---
-
-const FORBIDDEN_MOUNT_PATHS = new Set(["/", "/proc", "/dev", "/sys"]);
-
-function validateMountPath(mountPath, opts) {
-    opts = opts || {};
-    if (!mountPath || !path.isAbsolute(mountPath)) {
-        return { valid: false, reason: "Path must be absolute" };
-    }
-
-    const normalized = path.resolve(mountPath);
-
-    if (FORBIDDEN_MOUNT_PATHS.has(normalized)) {
-        return { valid: false, reason: "Path is forbidden: " + normalized };
-    }
-
-    for (const forbidden of FORBIDDEN_MOUNT_PATHS) {
-        if (forbidden !== "/" && normalized.startsWith(forbidden + "/")) {
-            return { valid: false, reason: "Path is under forbidden path: " + forbidden };
-        }
-    }
-
-    if (opts.readWrite) {
-        const home = os.homedir();
-        if (normalized !== home && !normalized.startsWith(home + "/")) {
-            return { valid: false, reason: "Read-write mounts must be under $HOME" };
-        }
-    }
-
-    return { valid: true };
-}
-
-function loadBwrapMountsConfig(configPath, logFn) {
-    const warn = logFn || log;
-    const empty = {
-        additionalROBinds: [],
-        additionalBinds: [],
-        disabledDefaultBinds: [],
-    };
-
-    if (!configPath) {
-        configPath = path.join(
-            process.env.HOME || os.homedir(),
-            ".config", "Claude", "claude_desktop_linux_config.json"
-        );
-    }
-
-    let raw;
-    try {
-        raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    } catch (_) {
-        return empty;
-    }
-
-    const mounts = raw && raw.preferences && raw.preferences.coworkBwrapMounts;
-    if (!mounts || typeof mounts !== "object") {
-        return empty;
-    }
-
-    function filterPaths(arr, readWrite) {
-        if (!Array.isArray(arr)) return [];
-        return arr.filter(function(p) {
-            if (typeof p !== "string") return false;
-            const result = validateMountPath(p, { readWrite: readWrite });
-            if (!result.valid) {
-                warn("BwrapConfig: rejected path \"" + p + "\": " + result.reason);
-            }
-            return result.valid;
-        });
-    }
-
-    return {
-        additionalROBinds: filterPaths(mounts.additionalROBinds, false),
-        additionalBinds: filterPaths(mounts.additionalBinds, true),
-        disabledDefaultBinds: Array.isArray(mounts.disabledDefaultBinds)
-            ? mounts.disabledDefaultBinds.filter(function(p) { return typeof p === "string"; })
-            : [],
-    };
-}
+const {
+    FORBIDDEN_MOUNT_PATHS,
+    CRITICAL_MOUNTS,
+    validateMountPath,
+    loadBwrapMountsConfig,
+    mergeBwrapArgs,
+} = require("'"${SCRIPT_DIR}"'/../scripts/cowork-vm-service.js");
 
 function loadBwrapMountsConfigWithLog(configPath, logFn) {
     return loadBwrapMountsConfig(configPath, logFn);
 }
 
-const CRITICAL_MOUNTS = new Set(["/", "/dev", "/proc"]);
-
-function mergeBwrapArgs(defaultArgs, config) {
-    const result = [];
-    const disabled = new Set(
-        config.disabledDefaultBinds.filter(function(p) { return !CRITICAL_MOUNTS.has(p); })
-    );
-
-    const TWO_ARG_FLAGS = new Set(["--tmpfs", "--dev", "--proc", "--dir"]);
-    const THREE_ARG_FLAGS = new Set(["--ro-bind", "--bind", "--symlink"]);
-
-    let i = 0;
-    while (i < defaultArgs.length) {
-        const flag = defaultArgs[i];
-
-        if (THREE_ARG_FLAGS.has(flag) && i + 2 < defaultArgs.length) {
-            const dest = defaultArgs[i + 2];
-            if (disabled.has(dest)) {
-                i += 3;
-                continue;
-            }
-            result.push(defaultArgs[i], defaultArgs[i + 1], defaultArgs[i + 2]);
-            i += 3;
-        } else if (TWO_ARG_FLAGS.has(flag) && i + 1 < defaultArgs.length) {
-            const dest = defaultArgs[i + 1];
-            if (disabled.has(dest)) {
-                i += 2;
-                continue;
-            }
-            result.push(defaultArgs[i], defaultArgs[i + 1]);
-            i += 2;
-        } else {
-            result.push(defaultArgs[i]);
-            i++;
-        }
-    }
-
-    for (const p of config.additionalROBinds) {
-        result.push("--ro-bind", p, p);
-    }
-    for (const p of config.additionalBinds) {
-        result.push("--bind", p, p);
-    }
-
-    return result;
-}
-
-// Helper assertions
 function assert(condition, msg) {
     if (!condition) {
         process.stderr.write("ASSERTION FAILED: " + msg + "\n");
@@ -273,6 +153,27 @@ assertDeepEqual(result, { valid: false, reason: 'Path must be absolute' }, 'empt
 	run node -e "${NODE_PREAMBLE}
 const result = validateMountPath('/opt/../proc');
 assertDeepEqual(result, { valid: false, reason: 'Path is forbidden: /proc' }, 'traversal to proc');
+"
+	[[ "$status" -eq 0 ]]
+}
+
+@test "validateMountPath: rejects symlink to forbidden path" {
+	local link_path="${TEST_TMP}/sneaky-link"
+	ln -s /proc "$link_path"
+	run node -e "${NODE_PREAMBLE}
+const result = validateMountPath('${link_path}');
+assert(!result.valid, 'symlink to /proc should be rejected');
+assert(result.reason.includes('forbidden'), 'reason: ' + result.reason);
+"
+	[[ "$status" -eq 0 ]]
+}
+
+@test "validateMountPath: accepts symlink to safe path" {
+	local link_path="${TEST_TMP}/safe-link"
+	ln -s /opt "$link_path"
+	run node -e "${NODE_PREAMBLE}
+const result = validateMountPath('${link_path}');
+assertDeepEqual(result, { valid: true }, 'symlink to /opt should be accepted');
 "
 	[[ "$status" -eq 0 ]]
 }
@@ -431,6 +332,61 @@ assertDeepEqual(result.additionalROBinds, ['/opt/tools', '/nix/store'],
 	[[ "$status" -eq 0 ]]
 }
 
+@test "loadBwrapMountsConfig: normalizes disabledDefaultBinds paths" {
+	run node -e "${NODE_PREAMBLE}
+const configPath = '${TEST_TMP}/config.json';
+fs.writeFileSync(configPath, JSON.stringify({
+    preferences: {
+        coworkBwrapMounts: {
+            disabledDefaultBinds: ['/etc/../usr', '/tmp/./']
+        }
+    }
+}));
+const result = loadBwrapMountsConfig(configPath);
+assertDeepEqual(result.disabledDefaultBinds, ['/usr', '/tmp'],
+    'paths should be normalized');
+"
+	[[ "$status" -eq 0 ]]
+}
+
+@test "loadBwrapMountsConfig: rejects critical mounts in disabledDefaultBinds" {
+	run node -e "${NODE_PREAMBLE}
+const warnings = [];
+function logWarn() { warnings.push(Array.from(arguments).join(' ')); }
+
+const configPath = '${TEST_TMP}/config.json';
+fs.writeFileSync(configPath, JSON.stringify({
+    preferences: {
+        coworkBwrapMounts: {
+            disabledDefaultBinds: ['/', '/dev', '/proc', '/etc']
+        }
+    }
+}));
+const result = loadBwrapMountsConfig(configPath, logWarn);
+assertDeepEqual(result.disabledDefaultBinds, ['/etc'],
+    'only /etc should survive');
+assertEqual(warnings.length, 3, 'three critical mount warnings');
+"
+	[[ "$status" -eq 0 ]]
+}
+
+@test "loadBwrapMountsConfig: rejects relative disabledDefaultBinds" {
+	run node -e "${NODE_PREAMBLE}
+const configPath = '${TEST_TMP}/config.json';
+fs.writeFileSync(configPath, JSON.stringify({
+    preferences: {
+        coworkBwrapMounts: {
+            disabledDefaultBinds: ['relative/path', '/etc']
+        }
+    }
+}));
+const result = loadBwrapMountsConfig(configPath);
+assertDeepEqual(result.disabledDefaultBinds, ['/etc'],
+    'relative path should be rejected');
+"
+	[[ "$status" -eq 0 ]]
+}
+
 # =============================================================================
 # mergeBwrapArgs — disabled default binds
 # =============================================================================
@@ -536,6 +492,32 @@ const expected = ['--tmpfs', '/', '--ro-bind', '/usr', '/usr',
     '--ro-bind', '/opt/tools', '/opt/tools',
     '--bind', home + '/shared', home + '/shared'];
 assertDeepEqual(result, expected, 'combined');
+"
+	[[ "$status" -eq 0 ]]
+}
+
+@test "mergeBwrapArgs: handles extended bwrap flags correctly" {
+	run node -e "${NODE_PREAMBLE}
+const defaults = [
+    '--ro-bind', '/usr', '/usr',
+    '--ro-bind-try', '/opt/lib', '/opt/lib',
+    '--dev-bind', '/dev/dri', '/dev/dri',
+    '--setenv', 'DISPLAY', ':0',
+    '--chdir', '/home/user',
+    '--unshare-pid', '--die-with-parent',
+];
+const result = mergeBwrapArgs(defaults, {
+    additionalROBinds: [], additionalBinds: [],
+    disabledDefaultBinds: ['/opt/lib']
+});
+const expected = [
+    '--ro-bind', '/usr', '/usr',
+    '--dev-bind', '/dev/dri', '/dev/dri',
+    '--setenv', 'DISPLAY', ':0',
+    '--chdir', '/home/user',
+    '--unshare-pid', '--die-with-parent',
+];
+assertDeepEqual(result, expected, 'extended flags parsed correctly');
 "
 	[[ "$status" -eq 0 ]]
 }
