@@ -15,6 +15,9 @@
         claude-desktop = pkgs.callPackage ./nix/claude-desktop.nix {
           inherit node-pty;
         };
+        claude-desktop-fhs = pkgs.callPackage ./nix/fhs.nix {
+          inherit claude-desktop;
+        };
       in {
         _module.args.pkgs = import inputs.nixpkgs {
           inherit system;
@@ -24,10 +27,7 @@
         };
 
         packages = {
-          inherit claude-desktop;
-          claude-desktop-fhs = pkgs.callPackage ./nix/fhs.nix {
-            inherit claude-desktop;
-          };
+          inherit claude-desktop claude-desktop-fhs;
           default = claude-desktop-fhs;
         };
       };
