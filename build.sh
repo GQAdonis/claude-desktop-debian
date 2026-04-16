@@ -1271,6 +1271,15 @@ if (!code.includes('"linux":{') && !code.includes("'linux':{") &&
 //
 // Fix: patch the ENOENT check to also match ECONNREFUSED on Linux,
 // then inject auto-launch before the retry delay.
+//
+// The auto-launch uses a timestamp-based cooldown (_lastSpawn) instead
+// of a one-shot boolean so the daemon can be re-spawned after it dies
+// mid-session (issue #408). 10s cooldown prevents fork storms on hard
+// failures while allowing recovery on the next retry iteration.
+//
+// stdout/stderr of the forked daemon is piped to
+// ~/.config/Claude/logs/cowork_vm_daemon.log so crashes are no longer
+// silent. Falls back to "ignore" if the log dir can't be opened.
 // ============================================================
 const serviceErrorStr = 'VM service not running. The service failed to start.';
 const serviceErrorIdx = code.indexOf(serviceErrorStr);
@@ -1333,17 +1342,32 @@ if (serviceErrorIdx !== -1) {
         while ((funcMatch = funcNameRe.exec(funcRegion)) !== null) {
             retryFuncName = funcMatch[1];
         }
-        const svcLaunchedGuard = retryFuncName
-            ? retryFuncName + '._svcLaunched'
-            : '_globalSvcLaunched';
+        const spawnGuard = retryFuncName
+            ? retryFuncName + '._lastSpawn'
+            : '_globalLastSpawn';
+        // Cooldown in ms — long enough to avoid fork storms, short enough
+        // that the retry loop can re-spawn after a mid-session daemon death.
         const autoLaunch =
-            'process.platform==="linux"&&!' + svcLaunchedGuard + '&&(' + svcLaunchedGuard + '=true,' +
+            'process.platform==="linux"&&' +
+            '(!' + spawnGuard + '||Date.now()-' + spawnGuard + '>1e4)' +
+            '&&(' + spawnGuard + '=Date.now(),' +
             '(()=>{try{' +
-            'const _d=require("path").join(process.resourcesPath,' +
+            'const _p=require("path"),_fs=require("fs");' +
+            'const _d=_p.join(process.resourcesPath,' +
             '"app.asar.unpacked","' + svcPath + '");' +
-            'if(require("fs").existsSync(_d)){' +
+            'if(_fs.existsSync(_d)){' +
+            // Open daemon log for append; fall back to ignoring stdio.
+            'let _stdio="ignore";' +
+            'try{' +
+            'const _ld=_p.join(process.env.HOME||"/tmp",' +
+            '".config/Claude/logs");' +
+            '_fs.mkdirSync(_ld,{recursive:true});' +
+            'const _fd=_fs.openSync(' +
+            '_p.join(_ld,"cowork_vm_daemon.log"),"a");' +
+            '_stdio=["ignore",_fd,_fd,"ipc"]' +
+            '}catch(_){}' +
             'const _c=require("child_process").fork(_d,[],' +
-            '{detached:true,stdio:"ignore",env:{...process.env,' +
+            '{detached:true,stdio:_stdio,env:{...process.env,' +
             'ELECTRON_RUN_AS_NODE:"1"}});' +
             'global.__coworkDaemonPid=_c.pid;_c.unref()}' +
             '}catch(_e){console.error("[cowork-autolaunch]",_e)}})()),';
@@ -1356,6 +1380,53 @@ if (serviceErrorIdx !== -1) {
     }
 } else {
     console.log('  WARNING: Could not find VM service error string for auto-launch');
+}
+
+// ============================================================
+// Patch 6b: Extend auto-reinstall delete list (issue #408)
+// Anchor: const NAME=["rootfs.img",...] — the module-level array
+// driving the reinstall-files cleanup in _ue()/deleteVMBundle().
+//
+// Upstream preserves sessiondata.img and rootfs.img.zst across
+// auto-reinstall to avoid re-download. On 1.2773.0, preserving
+// them puts the daemon into an unstartable state that persists
+// across app restarts and OS reboots. Trade-off: next startup
+// re-downloads/re-extracts these files. This only runs on the
+// auto-reinstall path (already in a failed state), so biasing
+// toward recovery over re-download avoidance is correct.
+// ============================================================
+{
+    const reinstallArrRe = /const (\w+)=\[("rootfs\.img"[^\]]*)\];/;
+    const arrMatch = code.match(reinstallArrRe);
+    if (arrMatch) {
+        const [whole, name, contents] = arrMatch;
+        const additions = [];
+        if (!contents.includes('"sessiondata.img"')) {
+            additions.push('"sessiondata.img"');
+        }
+        if (!contents.includes('"rootfs.img.zst"')) {
+            additions.push('"rootfs.img.zst"');
+        }
+        if (additions.length) {
+            const newContents = contents + ',' + additions.join(',');
+            code = code.replace(
+                whole,
+                'const ' + name + '=[' + newContents + '];'
+            );
+            console.log(
+                '  Added VM images to reinstall delete list'
+            );
+            patchCount++;
+        } else {
+            console.log(
+                '  Reinstall delete list already includes VM images'
+            );
+        }
+    } else {
+        console.log(
+            '  WARNING: Could not find reinstall file list array'
+        );
+    }
 }
 
 // ============================================================
