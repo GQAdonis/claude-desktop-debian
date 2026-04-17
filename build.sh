@@ -1432,25 +1432,29 @@ if (serviceErrorIdx !== -1) {
             const regionStart = Math.max(0, anchorIdx - 1000);
             const region = code.substring(regionStart, anchorIdx);
 
+            // JS identifier may start with $, _, or letter; \w doesn't
+            // match $ so use [$\w]+ to capture vars like `$e` (Claude
+            // >= 1.3109.0 uses $e for the fs module to avoid collision
+            // with the parameter `e`). See issue #418.
             // path var: VAR.join(process.resourcesPath,
             const pathMatch = region.match(
-                /(\w+)\.join\(\s*process\.resourcesPath\s*,/
+                /([$\w]+)\.join\(\s*process\.resourcesPath\s*,/
             );
             // fs var: VAR.existsSync(
-            const fsMatch = region.match(/(\w+)\.existsSync\(/);
+            const fsMatch = region.match(/([$\w]+)\.existsSync\(/);
             // logger var: VAR.info("[VM:start]
             const logMatch = region.match(
-                /(\w+)\.info\(\s*[`"]\[VM:start\]/
+                /([$\w]+)\.info\(\s*[`"]\[VM:start\]/
             );
             // stream/pipeline var: VAR.pipeline(
-            const streamMatch = region.match(/(\w+)\.pipeline\(/);
+            const streamMatch = region.match(/([$\w]+)\.pipeline\(/);
             // arch function: const VAR=FUNC(), used in smol-bin
             const archMatch = region.match(
-                /const\s+(\w+)\s*=\s*(\w+)\(\)\s*,\s*\w+\s*=\s*\w+\.join/
+                /const\s+([$\w]+)\s*=\s*([$\w]+)\(\)\s*,\s*[$\w]+\s*=\s*[$\w]+\.join/
             );
             // bundlePath var: PATH.join(VAR,"smol-bin.vhdx")
             const bundleMatch = region.match(
-                /\.join\(\s*(\w+)\s*,\s*"smol-bin\.vhdx"\s*\)/
+                /\.join\(\s*([$\w]+)\s*,\s*"smol-bin\.vhdx"\s*\)/
             );
 
             if (pathMatch && fsMatch && logMatch &&
@@ -1483,9 +1487,34 @@ if (serviceErrorIdx !== -1) {
                         '`[VM:start] smol-bin.${_la}' +
                         '.vhdx not found at ${_ls}`)' +
                     '}';
-                code = code.substring(0, closingBrace + 1) +
+                // Defensive: if a future upstream emits its own
+                // if(process.platform==="linux"){...} block right
+                // after the win32 close brace, strip it before
+                // injecting our correctly-wired linuxBlock so we
+                // don't end up with two competing blocks.
+                const insertPos = closingBrace + 1;
+                let stripUntil = insertPos;
+                const afterWin32 = code.substring(insertPos);
+                const upstreamRe = /^\s*if\s*\(\s*process\.platform\s*===\s*"linux"\s*\)\s*\{/;
+                const upstreamMatch = afterWin32.match(upstreamRe);
+                if (upstreamMatch) {
+                    const matchEnd = insertPos + upstreamMatch[0].length;
+                    let depth = 1, pos = matchEnd;
+                    while (depth > 0 && pos < code.length) {
+                        if (code[pos] === '{') depth++;
+                        else if (code[pos] === '}') depth--;
+                        pos++;
+                    }
+                    if (depth === 0) {
+                        stripUntil = pos;
+                        console.log('  Stripped pre-existing upstream Linux block');
+                    } else {
+                        console.log('  WARNING: Upstream Linux block found but braces unbalanced; not stripping');
+                    }
+                }
+                code = code.substring(0, insertPos) +
                     linuxBlock +
-                    code.substring(closingBrace + 1);
+                    code.substring(stripUntil);
                 console.log('  Injected Linux smol-bin copy block (skips _.configure)');
                 console.log(`    vars: path=${pathVar} fs=${fsVar} log=${logVar} stream=${streamVar} arch=${archFunc} bundle=${bundleVar}`);
                 patchCount++;
