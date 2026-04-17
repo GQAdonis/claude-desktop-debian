@@ -1634,6 +1634,18 @@ install_node_pty() {
 			"$app_staging_dir/app.asar.contents/node_modules/node-pty/" || exit 1
 		cp "$pty_src_dir/package.json" \
 			"$app_staging_dir/app.asar.contents/node_modules/node-pty/" || exit 1
+		# Also stage build/ so `asar pack --unpack '**/*.node'` can
+		# create a properly-tracked .unpacked entry. Without this,
+		# the asar manifest has no node-pty/build/ entry and
+		# Electron's asar->.unpacked redirect never fires, so
+		# require('../build/Release/pty.node') from inside the asar
+		# fails with MODULE_NOT_FOUND even when the binary exists
+		# in app.asar.unpacked/.
+		if [[ -d $pty_src_dir/build ]]; then
+			cp -r "$pty_src_dir/build" \
+				"$app_staging_dir/app.asar.contents/node_modules/node-pty/" || exit 1
+			echo 'node-pty build/ staged (will be unpacked during asar pack)'
+		fi
 		echo 'node-pty JavaScript files copied'
 	elif [[ -z $pty_src_dir ]]; then
 		echo 'node-pty source directory not set'
@@ -1646,7 +1658,13 @@ install_node_pty() {
 }
 
 finalize_app_asar() {
-	"$asar_exec" pack app.asar.contents app.asar || exit 1
+	# Pack with --unpack so native modules (.node) are extracted
+	# into app.asar.unpacked/ AND tracked in the asar manifest as
+	# unpacked. Electron's asar->.unpacked redirect requires the
+	# manifest entry to exist; otherwise loaders that require()
+	# files from inside the asar get MODULE_NOT_FOUND.
+	"$asar_exec" pack app.asar.contents app.asar \
+		--unpack '**/*.node' || exit 1
 
 	mkdir -p "$app_staging_dir/app.asar.unpacked/node_modules/@ant/claude-native" || exit 1
 	cp "$source_dir/scripts/claude-native-stub.js" \
