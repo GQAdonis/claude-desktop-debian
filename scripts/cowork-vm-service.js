@@ -57,6 +57,15 @@ function formatArgs(args) {
         .join(' ');
 }
 
+// Ensure the log directory exists once at startup so writeLog() isn't
+// silently discarded when the daemon is the first thing writing under
+// ~/.config/Claude/logs/ (issue #408 — crashes otherwise leave no trace).
+try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+} catch (_) {
+    // Best-effort — writeLog() still catches any later write errors.
+}
+
 function writeLog(level, args) {
     const ts = new Date().toISOString();
     const msg = `${ts} [${level}] ${LOG_PREFIX} ${formatArgs(args)}\n`;
@@ -65,6 +74,15 @@ function writeLog(level, args) {
     } catch (_) {
         // Ignore write errors (dir may not exist yet)
     }
+}
+
+// Always-on lifecycle logger for startup/shutdown/crash events so the
+// death of the daemon is never silent regardless of COWORK_VM_DEBUG.
+function logLifecycle(event, detail) {
+    const stack = detail && detail.stack
+        ? detail.stack
+        : (detail !== undefined ? String(detail) : '');
+    writeLog('lifecycle', stack ? [event, stack] : [event]);
 }
 
 function log(...args) {
@@ -2471,6 +2489,7 @@ function startServer() {
         }
         log(`Listening on ${SOCKET_PATH}`);
         console.log(`${LOG_PREFIX} Service started on ${SOCKET_PATH}`);
+        logLifecycle('listening', SOCKET_PATH);
     });
 
     // Graceful shutdown
@@ -2483,11 +2502,25 @@ function startServer() {
         });
     };
 
-    process.on('SIGTERM', shutdown);
-    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', () => {
+        logLifecycle('SIGTERM received');
+        shutdown();
+    });
+    process.on('SIGINT', () => {
+        logLifecycle('SIGINT received');
+        shutdown();
+    });
     process.on('uncaughtException', (err) => {
+        logLifecycle('uncaughtException', err);
         logError('Uncaught exception:', err);
         shutdown();
+    });
+    process.on('unhandledRejection', (reason) => {
+        logLifecycle('unhandledRejection', reason);
+        logError('Unhandled rejection:', reason);
+    });
+    process.on('exit', (code) => {
+        logLifecycle('exit', `code=${code}`);
     });
 }
 
@@ -2496,10 +2529,11 @@ function startServer() {
 // ============================================================
 
 // Always clean up stale socket and start. The app's retry wrapper has a
-// dedup flag (_svcLaunched) preventing duplicate daemon launches, so a
-// simple synchronous cleanup avoids the race condition where an async
-// connection test delays startup while the app is already retrying.
+// 10s spawn cooldown (_lastSpawn) preventing duplicate daemon launches,
+// so a simple synchronous cleanup avoids the race condition where an
+// async connection test delays startup while the app is already retrying.
 if (require.main === module) {
+    logLifecycle('startup', `pid=${process.pid} sock=${SOCKET_PATH}`);
     cleanupSocket();
     startServer();
 }

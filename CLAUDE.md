@@ -9,6 +9,7 @@ This project repackages Claude Desktop (Electron app) for Debian/Ubuntu Linux, a
 The [`docs/learnings/`](docs/learnings/) directory contains hard-won technical knowledge from debugging and fixing issues — things that aren't obvious from reading the code or docs alone. Consult these before working on related areas. Add new entries when you discover something non-obvious that would save future contributors (human or AI) significant time.
 
 - [`nix.md`](docs/learnings/nix.md) — NixOS packaging, Electron resource path resolution, testing without NixOS
+- [`cowork-vm-daemon.md`](docs/learnings/cowork-vm-daemon.md) — Cowork VM daemon lifecycle, respawn logic, crash diagnosis
 
 ## Code Style
 
