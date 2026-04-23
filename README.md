@@ -226,6 +226,7 @@ Special thanks to:
 - **[RayCharlizard](https://github.com/RayCharlizard)**
   - Detailed analysis of the self-referential `.mcpb-cache` symlink ELOOP bug
   - Fixing auto-memory path translation on HostBackend
+  - Fixing the `ion-dist` static asset copy for the `app://` protocol handler
 - **[reinthal](https://github.com/reinthal)** for fixing the NixOS build breakage caused by the nixpkgs `nodePackages` removal
 - **[gianluca-peri](https://github.com/gianluca-peri)**
   - Reporting the GNOME quit accessibility issue
